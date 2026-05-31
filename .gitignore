@@ -1,0 +1,95 @@
+# =============================================================================
+# friendbuy-ai — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SECRETS — never commit these
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Test & coverage artifacts
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# -----------------------------------------------------------------------------
+# AI / RAG data (generated — re-create with "python cli.py index")
+# -----------------------------------------------------------------------------
+friendbuy-knowledge-base/
+friendbuy-graph-db/
+
+# Keep the cache directory but ignore the generated SQLite databases
+cache/*.db
+cache/*.jsonl
+# (cache/.gitkeep is tracked so the folder exists in a fresh clone)
+
+# -----------------------------------------------------------------------------
+# Repos folder — drop cloned repos here; never commit them
+# -----------------------------------------------------------------------------
+repos/*
+# Keep the placeholder so the folder exists after cloning
+!repos/.gitkeep
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# -----------------------------------------------------------------------------
+# IDEs
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# Node (in case any repo inside ./repos/ has these)
+# -----------------------------------------------------------------------------
+node_modules/
