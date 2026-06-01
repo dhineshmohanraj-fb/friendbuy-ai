@@ -256,7 +256,52 @@ def embed_and_store(
     table.add_row("[bold]Total[/bold]", f"[bold]{len(chunks):,}[/bold]")
     con.print(table)
 
+    # CP1 — populate Repo + File nodes in the knowledge graph
+    if settings.use_graph:
+        _update_graph(chunks, file_chunks, reindex, con)
+
     return db  # type: ignore[return-value]
+
+
+def _update_graph(
+    chunks: list[Document],
+    file_chunks: dict[str, list[str]],
+    reindex: bool,
+    con: Console,
+) -> None:
+    """Upsert Repo and File nodes into Kuzu (CP1). Errors are non-fatal."""
+    try:
+        from indexer.graph_builder import GraphBuilder, repo_node_id
+
+        with GraphBuilder() as gb:
+            if reindex:
+                gb.clear_all()
+
+            # Collect unique repos and their local paths
+            repo_paths: dict[str, str] = {}
+            for chunk in chunks:
+                rname = chunk.metadata.get("repo_name", "")
+                if rname and rname not in repo_paths:
+                    repo_paths[rname] = chunk.metadata.get("repos_dir", "")
+
+            # Upsert Repo nodes first (File edges reference them)
+            for rname, rpath in repo_paths.items():
+                gb.upsert_repo(rname, rpath)
+
+            # Upsert File nodes
+            n_files = gb.upsert_files_from_chunks(chunks, file_chunks)
+
+            con.print(
+                f"[dim]Graph updated: {n_files} files, "
+                f"{len(repo_paths)} repos in Kuzu.[/dim]"
+            )
+    except ImportError:
+        con.print(
+            "[yellow]Warning:[/yellow] Kuzu not installed — skipping graph update.\n"
+            "Run [bold]pip install kuzu>=0.6.0[/bold] to enable the knowledge graph."
+        )
+    except Exception as exc:  # noqa: BLE001
+        con.print(f"[yellow]Warning:[/yellow] Graph update failed (non-fatal): {exc}")
 
 
 def load_vector_store() -> Chroma:

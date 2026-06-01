@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # Cache / delta tracking
     cache_dir: str = "./cache"
 
+    # Graph DB (Kuzu) — CP1
+    graph_db_dir: str = "./friendbuy-graph-db"
+    use_graph: bool = True              # set USE_GRAPH=false to skip graph entirely
+
+    # File loading — skip huge files to protect M1 RAM
+    file_size_cap_bytes: int = 512_000  # 500 KB
+
     # API server
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -84,6 +91,10 @@ class Settings(BaseSettings):
     @property
     def cache_path(self) -> Path:
         return Path(self.cache_dir)
+
+    @property
+    def graph_db_path(self) -> Path:
+        return Path(self.graph_db_dir)
 
 
 @functools.lru_cache(maxsize=1)

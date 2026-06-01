@@ -30,7 +30,8 @@ console = Console()
 # index command
 # ---------------------------------------------------------------------------
 
-def cmd_index(reindex: bool) -> None:
+def cmd_index(reindex: bool, no_graph: bool = False) -> None:
+    from config import get_settings
     from indexer.embedder import embed_and_store
     from indexer.repo_loader import load_repos
     from indexer.splitter import split_documents
@@ -39,6 +40,12 @@ def cmd_index(reindex: bool) -> None:
 
     if reindex:
         console.print("[yellow]--reindex flag set: existing index will be wiped.[/yellow]\n")
+    if no_graph:
+        # Temporarily disable graph for this run
+        import os
+        os.environ["USE_GRAPH"] = "false"
+        get_settings.cache_clear()
+        console.print("[dim]--no-graph: skipping knowledge graph update.[/dim]\n")
 
     console.print("[bold]Step 1/3[/bold]  Loading files from repos…\n")
     documents = load_repos()
@@ -49,7 +56,13 @@ def cmd_index(reindex: bool) -> None:
 
     console.print(f"\n[bold]Step 2/3[/bold]  Splitting {len(documents):,} documents into chunks…")
     chunks = split_documents(documents)
-    console.print(f"  → {len(chunks):,} chunks created\n")
+
+    # Show AST vs character split breakdown
+    ast_chunks  = sum(1 for c in chunks if "symbol_name" in c.metadata)
+    char_chunks = len(chunks) - ast_chunks
+    console.print(f"  → {len(chunks):,} chunks  "
+                  f"([cyan]{ast_chunks:,}[/cyan] AST-aware, "
+                  f"[dim]{char_chunks:,}[/dim] character-split)\n")
 
     console.print("[bold]Step 3/3[/bold]  Embedding & storing in ChromaDB…\n")
     embed_and_store(chunks, reindex=reindex)
@@ -148,6 +161,61 @@ def cmd_stats() -> None:
 
 
 # ---------------------------------------------------------------------------
+# graph-stats command
+# ---------------------------------------------------------------------------
+
+def cmd_graph_stats() -> None:
+    from config import get_settings
+
+    console.print(Rule("[bold cyan]friendbuy-ai — Graph Stats[/bold cyan]"))
+
+    settings = get_settings()
+    if not settings.graph_db_path.exists():
+        console.print(
+            "[yellow]No graph index found.[/yellow] "
+            "Run [bold]python cli.py index[/bold] to build it."
+        )
+        return
+
+    try:
+        from indexer.graph_builder import GraphBuilder
+
+        with GraphBuilder() as gb:
+            stats = gb.graph_stats()
+
+        # Nodes table
+        node_table = Table(title="Graph Nodes", show_header=True, header_style="bold cyan")
+        node_table.add_column("Node type", style="cyan")
+        node_table.add_column("Count", justify="right", style="green")
+        for label in ["Repo", "File", "Class", "Function", "APIEndpoint"]:
+            node_table.add_row(label, f"{stats.get(label, 0):,}")
+        console.print(node_table)
+
+        # Edges table
+        edge_table = Table(title="Graph Edges", show_header=True, header_style="bold cyan")
+        edge_table.add_column("Relationship", style="cyan")
+        edge_table.add_column("Count", justify="right", style="green")
+        for rel in ["BELONGS_TO_REPO", "CONTAINS_CLASS", "CONTAINS_FUNCTION",
+                    "METHOD_OF", "IMPORT_DEP", "CALLS", "EXPOSES",
+                    "HANDLES", "INHERITS", "CROSS_REPO_CALL"]:
+            cnt = stats.get(rel, 0)
+            style = "green" if cnt > 0 else "dim"
+            edge_table.add_row(rel, f"[{style}]{cnt:,}[/{style}]")
+        console.print(edge_table)
+
+        console.print(f"\n[dim]Graph DB: {settings.graph_db_path.resolve()}[/dim]")
+        console.print(
+            "[dim]Edges will be populated in CP2 (Class/Function extraction).[/dim]"
+        )
+
+    except ImportError:
+        console.print(
+            "[red]Kuzu not installed.[/red] "
+            "Run [bold]pip install kuzu>=0.6.0[/bold]"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -165,6 +233,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Wipe existing index and rebuild from scratch",
     )
+    p_index.add_argument(
+        "--no-graph",
+        action="store_true",
+        dest="no_graph",
+        help="Skip knowledge graph update (vector index only)",
+    )
 
     # ask
     p_ask = sub.add_parser("ask", help="Ask a question about the codebase")
@@ -177,7 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # stats
-    sub.add_parser("stats", help="Show index statistics")
+    sub.add_parser("stats", help="Show vector index statistics")
+
+    # graph-stats
+    sub.add_parser("graph-stats", help="Show knowledge graph statistics (CP1)")
 
     return parser
 
@@ -188,11 +265,13 @@ def main() -> None:
 
     try:
         if args.command == "index":
-            cmd_index(reindex=args.reindex)
+            cmd_index(reindex=args.reindex, no_graph=args.no_graph)
         elif args.command == "ask":
             cmd_ask(question=args.question, repo=args.repo)
         elif args.command == "stats":
             cmd_stats()
+        elif args.command == "graph-stats":
+            cmd_graph_stats()
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(0)

@@ -210,4 +210,3 @@ All options live in `.env` (see `.env.example`):
 - ChromaDB stores vectors on disk — only loaded chunks stay in RAM.
 - Quit other heavy apps (browser tabs, Docker) before indexing large repos.
 - If you run out of memory during indexing, reduce `CHUNK_SIZE` to `500`.
-# friendbuy-ai

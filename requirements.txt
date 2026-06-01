@@ -14,3 +14,15 @@ pydantic>=2.10.0
 pydantic-settings>=2.6.0
 # CP0 — delta tracking
 gitpython>=3.1
+
+# CP1 — AST-aware chunking
+tree-sitter>=0.22.0
+tree-sitter-python>=0.22.0
+tree-sitter-javascript>=0.22.0
+tree-sitter-typescript>=0.22.0
+
+# CP1 — graph database (embedded, no server needed)
+# NOTE: kuzu requires Python 3.11 or 3.12 — no wheel for 3.13+ yet.
+# If you are on Python 3.13+, the graph features are skipped gracefully.
+# To enable: recreate the venv with Python 3.11 → then pip install kuzu>=0.6.0
+kuzu>=0.6.0; python_version < "3.13"
