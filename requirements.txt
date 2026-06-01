@@ -32,3 +32,7 @@ pytest>=8.0.0
 
 # CP3 — hybrid retrieval (BM25 sparse search)
 rank-bm25>=0.2
+
+# CP4 — cross-encoder reranker (optional; pipeline degrades gracefully without it)
+# To enable: pip install flashrank>=0.2
+# flashrank>=0.2

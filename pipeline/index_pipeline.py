@@ -1,5 +1,5 @@
 """
-Unified indexing pipeline — CP2.
+Unified indexing pipeline — CP2 / CP4.
 
 Orchestrates the full index flow:
   1. Load source files from ``repos/``
@@ -8,6 +8,7 @@ Orchestrates the full index flow:
   4. Embed & persist in ChromaDB  +  upsert Repo/File graph nodes
   5. Full symbol extraction  →  upsert Class / Function / APIEndpoint nodes
      and structural edges in Kuzu
+  6. Cross-repo inference  →  detect HTTP / Kafka CROSS_REPO_CALL edges (CP4)
 
 Usage::
 
@@ -201,6 +202,29 @@ class IndexPipeline:
                 node_ids = file_node_map.get(fid, [])
                 if node_ids:
                     tracker.update_graph_node_ids(fid, node_ids)
+
+        # ------------------------------------------------------------------
+        # Step 6: Cross-repo inference (CP4)
+        # ------------------------------------------------------------------
+        cross_repo_edges = 0
+        if not no_graph and settings.use_graph and settings.use_cross_repo_linking:
+            con.print("\n[bold]Step 5/5[/bold]  Cross-repo link inference…")
+            try:
+                from indexer.cross_repo_linker import CrossRepoLinker
+                cross_repo_edges = CrossRepoLinker().run(changed_docs)
+                if cross_repo_edges:
+                    con.print(
+                        f"  → [cyan]{cross_repo_edges:,}[/cyan] CROSS_REPO_CALL edges created"
+                    )
+                else:
+                    con.print("  → [dim]No cross-repo calls detected[/dim]")
+            except Exception as exc:  # noqa: BLE001
+                con.print(
+                    f"  [dim]Cross-repo linking skipped: {exc}[/dim]"
+                )
+
+            if cross_repo_edges:
+                graph_counts["cross_repo_edges"] = cross_repo_edges
 
         elapsed = time.time() - start
         con.print(f"\n[bold green]✓ Done in {elapsed:.1f}s[/bold green]")

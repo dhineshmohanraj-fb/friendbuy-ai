@@ -7,6 +7,13 @@ CP3 changes vs CP2:
 - Graph relationship summary is prepended to the Qwen curation prompt and
   injected into the Claude context block.
 - Per-query trace written to ``cache/query_traces.jsonl``.
+
+CP4 changes vs CP3:
+- Semantic cache lookup before any LLM call (cosine threshold 0.93).
+  Cache HIT → return stored answer immediately.
+  Cache MISS → run pipeline, then store result.
+- FlashRank cross-encoder reranker applied after RRF fusion.
+- ``cache_hit`` / ``cache_similarity`` added to ``PipelineResult``.
 """
 
 from __future__ import annotations
@@ -50,6 +57,9 @@ class PipelineResult:
     graph_count:    int   = 0
     query_entities: list[str] = None   # type: ignore[assignment]
     retrieval_ms:   float = 0.0
+    # CP4 additions
+    cache_hit:        bool  = False
+    cache_similarity: float = 0.0
 
     def __post_init__(self) -> None:
         if self.query_entities is None:
@@ -111,6 +121,32 @@ def run(
         raise SystemExit(1)
 
     # ------------------------------------------------------------------
+    # 0. Semantic cache lookup  (CP4)
+    # ------------------------------------------------------------------
+    if settings.use_semantic_cache:
+        try:
+            from retriever.semantic_cache import SemanticCache
+            _cache = SemanticCache()
+            hit = _cache.lookup(query)
+            if hit:
+                return PipelineResult(
+                    answer=hit.answer,
+                    relevant_files=hit.relevant_files,
+                    input_tokens=hit.input_tokens,
+                    output_tokens=hit.output_tokens,
+                    raw_chunks=[],
+                    vector_count=hit.vector_count,
+                    bm25_count=hit.bm25_count,
+                    graph_count=hit.graph_count,
+                    query_entities=hit.query_entities,
+                    retrieval_ms=hit.retrieval_ms,
+                    cache_hit=True,
+                    cache_similarity=hit.similarity,
+                )
+        except Exception:  # noqa: BLE001
+            pass   # cache failure must never break the pipeline
+
+    # ------------------------------------------------------------------
     # 1. Hybrid retrieval  (vector + BM25 + graph)
     # ------------------------------------------------------------------
     t_retrieval = time.time()
@@ -150,6 +186,16 @@ def run(
             query_entities=query_entities,
             retrieval_ms=retrieval_ms,
         )
+
+    # ------------------------------------------------------------------
+    # 1b. Cross-encoder reranking  (CP4)
+    # ------------------------------------------------------------------
+    if settings.use_reranker and results:
+        try:
+            from retriever.reranker import rerank as _rerank
+            results = _rerank(query, results, top_k=settings.top_k_results)
+        except Exception:  # noqa: BLE001
+            pass   # reranker failure is non-fatal
 
     # ------------------------------------------------------------------
     # 2. Qwen context curation
@@ -237,7 +283,7 @@ def run(
         "timestamp":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
 
-    return PipelineResult(
+    final_result = PipelineResult(
         answer=answer,
         relevant_files=relevant_files,
         input_tokens=input_tokens,
@@ -248,4 +294,18 @@ def run(
         graph_count=g_count,
         query_entities=query_entities,
         retrieval_ms=retrieval_ms,
+        cache_hit=False,
+        cache_similarity=0.0,
     )
+
+    # ------------------------------------------------------------------
+    # 6. Store result in semantic cache  (CP4)
+    # ------------------------------------------------------------------
+    if settings.use_semantic_cache:
+        try:
+            from retriever.semantic_cache import SemanticCache
+            SemanticCache().store(query, final_result)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return final_result

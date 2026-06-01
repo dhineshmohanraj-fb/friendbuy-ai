@@ -67,6 +67,21 @@ class StatsResponse(BaseModel):
     indexed_at: str | None
 
 
+class GraphTraverseResponse(BaseModel):
+    entity:          str
+    entity_type:     str | None = None
+    file_path:       str | None = None
+    repo_name:       str | None = None
+    related_files:   list[str]
+    relationship_summary: str
+    hops:            int
+
+
+class CacheInvalidateResponse(BaseModel):
+    deleted:   int
+    message:   str
+
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
@@ -102,7 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="friendbuy-ai",
     description="RAG knowledge pipeline for the Friendbuy codebase",
-    version="0.2.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -276,6 +291,87 @@ async def index_status(job_id: str) -> IndexJobStatus:
     if job_id not in _index_jobs:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     return IndexJobStatus(**_index_jobs[job_id])
+
+
+# ---------------------------------------------------------------------------
+# Graph traverse endpoint  (CP4)
+# ---------------------------------------------------------------------------
+
+@app.get("/graph/traverse", response_model=GraphTraverseResponse, tags=["graph"])
+async def graph_traverse(
+    entity: str,
+    hops: int = 2,
+    repo: str | None = None,
+) -> GraphTraverseResponse:
+    """
+    Traverse the knowledge graph from a named entity (class, function, or endpoint).
+
+    Returns related file paths and a markdown relationship summary.
+    Useful for exploring how a symbol connects to the rest of the codebase.
+    """
+    settings = get_settings()
+    if not settings.graph_db_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Graph index not built. Run 'python cli.py index' first.",
+        )
+
+    try:
+        from retriever.graph_search import GraphSearcher
+
+        with GraphSearcher() as gs:
+            ctx = gs.traverse([entity], max_hops=min(hops, 3))
+
+        if ctx.is_empty():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Entity '{entity}' not found in the knowledge graph.",
+            )
+
+        # Resolve entity metadata from first match
+        first = ctx.entities_found[0] if ctx.entities_found else None
+
+        return GraphTraverseResponse(
+            entity=entity,
+            entity_type=first.node_type if first else None,
+            file_path=first.file_path if first else None,
+            repo_name=first.repo_name if first else None,
+            related_files=list(ctx.related_file_paths),
+            relationship_summary=ctx.relationship_summary or "",
+            hops=hops,
+        )
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="Kuzu not installed. Run 'pip install kuzu>=0.6.0'.",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Cache invalidate endpoint  (CP4)
+# ---------------------------------------------------------------------------
+
+@app.post("/cache/invalidate", response_model=CacheInvalidateResponse, tags=["cache"])
+async def cache_invalidate() -> CacheInvalidateResponse:
+    """
+    Clear the semantic query cache.
+
+    All cached query→answer pairs are deleted.  The next identical or
+    semantically-similar question will run the full retrieval + LLM pipeline.
+    """
+    try:
+        from retriever.semantic_cache import SemanticCache
+        deleted = SemanticCache().invalidate()
+        return CacheInvalidateResponse(
+            deleted=deleted,
+            message=f"Deleted {deleted} cached query entries.",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

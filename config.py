@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     bm25_top_k:     int  = 20    # candidates from BM25 before RRF
     vector_top_k:   int  = 20    # candidates from dense search before RRF
 
+    # CP4 — Semantic cache
+    use_semantic_cache:        bool  = True   # enable semantic query cache
+    semantic_cache_threshold:  float = 0.93   # cosine similarity hit threshold
+    semantic_cache_max_size:   int   = 1000   # max entries (LRU eviction)
+
+    # CP4 — Reranker
+    use_reranker: bool = True   # cross-encoder reranking via flashrank
+
+    # CP4 — Cross-repo linking
+    use_cross_repo_linking: bool = True   # detect HTTP/Kafka cross-repo edges
+
     # API server
     api_host: str = "0.0.0.0"
     api_port: int = 8000

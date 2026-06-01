@@ -95,6 +95,13 @@ def cmd_ask(
             use_bm25=not no_bm25,
         )
 
+    # CP4: cache hit indicator
+    if result.cache_hit:
+        console.print(
+            f"[bold green]⚡ Cache hit[/bold green] "
+            f"[dim](similarity {result.cache_similarity:.3f})[/dim]"
+        )
+
     # CP3 retrieval breakdown
     retrieval_parts = [f"vector:[cyan]{result.vector_count}[/cyan]"]
     if result.bm25_count:
@@ -104,10 +111,11 @@ def cmd_ask(
     if result.query_entities:
         entities_str = ", ".join(f"[cyan]{e}[/cyan]" for e in result.query_entities[:4])
         retrieval_parts.append(f"entities:{entities_str}")
-    console.print(
-        f"[dim]Retrieval ({result.retrieval_ms:.0f}ms):[/dim] "
-        + "  ".join(retrieval_parts)
-    )
+    if not result.cache_hit:
+        console.print(
+            f"[dim]Retrieval ({result.retrieval_ms:.0f}ms):[/dim] "
+            + "  ".join(retrieval_parts)
+        )
     console.print()
 
     # Files used
