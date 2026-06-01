@@ -66,17 +66,49 @@ def cmd_index(reindex: bool, no_graph: bool = False) -> None:
 # ask command
 # ---------------------------------------------------------------------------
 
-def cmd_ask(question: str, repo: str | None) -> None:
+def cmd_ask(
+    question: str,
+    repo: str | None,
+    no_graph: bool = False,
+    no_bm25: bool = False,
+) -> None:
     from pipeline.query_pipeline import run
 
     console.print(Rule("[bold cyan]friendbuy-ai — Query[/bold cyan]"))
     console.print(f"[dim]Question:[/dim] {question}")
     if repo:
         console.print(f"[dim]Scoped to repo:[/dim] [cyan]{repo}[/cyan]")
+    flags = []
+    if no_graph:
+        flags.append("no-graph")
+    if no_bm25:
+        flags.append("no-bm25")
+    if flags:
+        console.print(f"[dim]Retrieval flags:[/dim] {', '.join(flags)}")
     console.print()
 
     with Status("[bold]Retrieving context…[/bold]", spinner="dots", console=console):
-        result = run(query=question, repo_name=repo)
+        result = run(
+            query=question,
+            repo_name=repo,
+            use_graph=not no_graph,
+            use_bm25=not no_bm25,
+        )
+
+    # CP3 retrieval breakdown
+    retrieval_parts = [f"vector:[cyan]{result.vector_count}[/cyan]"]
+    if result.bm25_count:
+        retrieval_parts.append(f"BM25:[cyan]{result.bm25_count}[/cyan]")
+    if result.graph_count:
+        retrieval_parts.append(f"graph:[cyan]{result.graph_count}[/cyan]")
+    if result.query_entities:
+        entities_str = ", ".join(f"[cyan]{e}[/cyan]" for e in result.query_entities[:4])
+        retrieval_parts.append(f"entities:{entities_str}")
+    console.print(
+        f"[dim]Retrieval ({result.retrieval_ms:.0f}ms):[/dim] "
+        + "  ".join(retrieval_parts)
+    )
+    console.print()
 
     # Files used
     if result.relevant_files:
@@ -238,6 +270,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Scope the search to a single repo by name",
     )
+    p_ask.add_argument(
+        "--no-graph",
+        action="store_true",
+        dest="no_graph",
+        help="Disable graph traversal — vector + BM25 only",
+    )
+    p_ask.add_argument(
+        "--no-bm25",
+        action="store_true",
+        dest="no_bm25",
+        help="Disable BM25 sparse search — vector (+ graph) only",
+    )
 
     # stats
     sub.add_parser("stats", help="Show vector index statistics")
@@ -256,7 +300,12 @@ def main() -> None:
         if args.command == "index":
             cmd_index(reindex=args.reindex, no_graph=args.no_graph)
         elif args.command == "ask":
-            cmd_ask(question=args.question, repo=args.repo)
+            cmd_ask(
+                question=args.question,
+                repo=args.repo,
+                no_graph=getattr(args, "no_graph", False),
+                no_bm25=getattr(args, "no_bm25", False),
+            )
         elif args.command == "stats":
             cmd_stats()
         elif args.command == "graph-stats":

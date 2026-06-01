@@ -1,20 +1,33 @@
-"""End-to-end query pipeline: retrieve → filter → Claude."""
+"""
+End-to-end query pipeline: hybrid retrieve → Qwen filter → Claude.
+
+CP3 changes vs CP2:
+- Uses ``hybrid_retriever.retrieve()`` instead of plain vector search.
+  Result is a fusion of dense vector + BM25 sparse + graph traversal (RRF).
+- Graph relationship summary is prepended to the Qwen curation prompt and
+  injected into the Claude context block.
+- Per-query trace written to ``cache/query_traces.jsonl``.
+"""
 
 from __future__ import annotations
 
+import json
+import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import anthropic
 from rich.console import Console
 
 from config import get_settings
 from retriever.context_filter import filter_and_summarise
-from retriever.vector_search import SearchResult, search
+from retriever.vector_search import SearchResult
+
 
 def _console() -> Console:
     return Console()
 
-console = _console()   # kept for any direct references; use _console() in new code
 
 _SYSTEM_PROMPT = """\
 You are an expert software engineer with deep knowledge of the Friendbuy codebase.
@@ -26,74 +39,155 @@ codebase.  If the provided context is insufficient, say so clearly rather than g
 
 @dataclass
 class PipelineResult:
-    answer: str
+    answer:         str
     relevant_files: list[str]
-    input_tokens: int
-    output_tokens: int
-    raw_chunks: list[SearchResult]
+    input_tokens:   int
+    output_tokens:  int
+    raw_chunks:     list[SearchResult]
+    # CP3 additions
+    vector_count:   int   = 0
+    bm25_count:     int   = 0
+    graph_count:    int   = 0
+    query_entities: list[str] = None   # type: ignore[assignment]
+    retrieval_ms:   float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.query_entities is None:
+            self.query_entities = []
+
+
+# ---------------------------------------------------------------------------
+# Trace logging
+# ---------------------------------------------------------------------------
+
+def _write_trace(trace: dict) -> None:
+    """Append a query trace record to ``cache/query_traces.jsonl``."""
+    try:
+        from config import get_settings
+        trace_path = Path(get_settings().cache_dir) / "query_traces.jsonl"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with trace_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(trace) + "\n")
+    except Exception:  # noqa: BLE001
+        pass   # trace failure must never affect the user response
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 
 def run(
     query: str,
     repo_name: str | None = None,
     top_k: int | None = None,
     stream: bool = False,
+    use_graph: bool = True,
+    use_bm25:  bool = True,
 ) -> PipelineResult:
     """
-    Full RAG pipeline: vector search → Qwen filter → Claude answer.
+    Full CP3 RAG pipeline:
+    hybrid_retrieve → Qwen filter (+ graph summary) → Claude answer.
 
     Args:
         query:     The user's question.
-        repo_name: Restrict vector search to this repo (optional).
+        repo_name: Restrict retrieval to this repo (optional).
         top_k:     Override default number of retrieved chunks.
-        stream:    If True, print the Claude response to stdout as it streams.
+        stream:    If True, stream the Claude response to stdout.
+        use_graph: Include Kuzu graph traversal in retrieval.
+        use_bm25:  Include BM25 sparse search in retrieval.
 
     Returns:
-        A PipelineResult containing the answer and usage metadata.
+        A :class:`PipelineResult` with the answer and metadata.
     """
-    settings = get_settings()
+    settings   = get_settings()
+    query_id   = str(uuid.uuid4())
+    t_start    = time.time()
 
     if not settings.anthropic_api_key:
-        console.print(
+        _console().print(
             "\n[bold red]Error:[/bold red] ANTHROPIC_API_KEY is not set.\n"
             "Add it to your [bold].env[/bold] file and restart."
         )
         raise SystemExit(1)
 
-    # --- 1. Vector search ------------------------------------------------
-    results: list[SearchResult] = search(query, top_k=top_k, repo_name=repo_name)
+    # ------------------------------------------------------------------
+    # 1. Hybrid retrieval  (vector + BM25 + graph)
+    # ------------------------------------------------------------------
+    t_retrieval = time.time()
+    try:
+        from retriever.hybrid_retriever import retrieve as hybrid_retrieve
+        hybrid = hybrid_retrieve(
+            query=query,
+            repo_name=repo_name,
+            top_k=top_k,
+            use_graph=use_graph,
+            use_bm25=use_bm25,
+        )
+        results         = hybrid.chunks
+        graph_ctx       = hybrid.graph_context
+        v_count         = hybrid.vector_count
+        b_count         = hybrid.bm25_count
+        g_count         = hybrid.graph_count
+        query_entities  = hybrid.query_entities
+    except Exception:  # noqa: BLE001
+        # Fallback to plain vector search if hybrid fails
+        from retriever.vector_search import search
+        results        = search(query, top_k=top_k, repo_name=repo_name)
+        graph_ctx      = None
+        v_count        = len(results)
+        b_count        = g_count = 0
+        query_entities = []
+
+    retrieval_ms = (time.time() - t_retrieval) * 1000
 
     if not results:
         return PipelineResult(
             answer="No relevant context found in the knowledge base for your query.",
             relevant_files=[],
-            input_tokens=0,
-            output_tokens=0,
+            input_tokens=0, output_tokens=0,
             raw_chunks=[],
+            vector_count=v_count, bm25_count=b_count, graph_count=g_count,
+            query_entities=query_entities,
+            retrieval_ms=retrieval_ms,
         )
 
-    # --- 2. Local Qwen filter / summarise --------------------------------
-    context_data = filter_and_summarise(query, results)
-    summary: str = context_data["summary"]
-    relevant_files: list[str] = context_data["relevant_files"]
-    raw_chunks: list[SearchResult] = context_data["raw_chunks"]
+    # ------------------------------------------------------------------
+    # 2. Qwen context curation
+    # ------------------------------------------------------------------
+    context_data   = filter_and_summarise(query, results)
+    summary:  str  = context_data["summary"]
+    relevant_files = context_data["relevant_files"]
+    raw_chunks     = context_data["raw_chunks"]
 
-    # --- 3. Build Claude prompt ------------------------------------------
+    # ------------------------------------------------------------------
+    # 3. Build Claude prompt — inject graph summary when available
+    # ------------------------------------------------------------------
+    graph_section = ""
+    if graph_ctx and not graph_ctx.is_empty() and graph_ctx.relationship_summary:
+        graph_section = (
+            "\n## Structural relationships (from knowledge graph)\n\n"
+            + graph_ctx.relationship_summary
+            + "\n"
+        )
+
     user_message = (
         "## Context from Friendbuy codebase\n\n"
-        f"{summary}\n\n"
-        "## Relevant files\n"
+        f"{summary}\n"
+        f"{graph_section}"
+        "\n## Relevant files\n"
         + "\n".join(f"- {f}" for f in relevant_files)
         + f"\n\n## Question\n\n{query}"
     )
 
-    # --- 4. Call Claude --------------------------------------------------
+    # ------------------------------------------------------------------
+    # 4. Claude API call
+    # ------------------------------------------------------------------
+    t_llm  = time.time()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
     if stream:
         answer_parts: list[str] = []
-        input_tokens = 0
-        output_tokens = 0
+        input_tokens = output_tokens = 0
 
         with client.messages.stream(
             model=settings.claude_model,
@@ -105,10 +199,10 @@ def run(
                 print(text, end="", flush=True)
                 answer_parts.append(text)
             final = streamer.get_final_message()
-            input_tokens = final.usage.input_tokens
+            input_tokens  = final.usage.input_tokens
             output_tokens = final.usage.output_tokens
 
-        print()  # newline after streamed output
+        print()
         answer = "".join(answer_parts)
     else:
         response = client.messages.create(
@@ -117,9 +211,31 @@ def run(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
-        answer = response.content[0].text
-        input_tokens = response.usage.input_tokens
+        answer        = response.content[0].text
+        input_tokens  = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
+
+    llm_ms = (time.time() - t_llm) * 1000
+
+    # ------------------------------------------------------------------
+    # 5. Trace log
+    # ------------------------------------------------------------------
+    _write_trace({
+        "query_id":           query_id,
+        "query":              query,
+        "repo_name":          repo_name,
+        "vector_chunks":      v_count,
+        "bm25_chunks":        b_count,
+        "graph_chunks":       g_count,
+        "graph_entities":     query_entities,
+        "total_fused_chunks": len(results),
+        "relevant_files":     relevant_files,
+        "retrieval_ms":       round(retrieval_ms, 1),
+        "llm_ms":             round(llm_ms, 1),
+        "input_tokens":       input_tokens,
+        "output_tokens":      output_tokens,
+        "timestamp":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
 
     return PipelineResult(
         answer=answer,
@@ -127,4 +243,9 @@ def run(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         raw_chunks=raw_chunks,
+        vector_count=v_count,
+        bm25_count=b_count,
+        graph_count=g_count,
+        query_entities=query_entities,
+        retrieval_ms=retrieval_ms,
     )

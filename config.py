@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # File loading — skip huge files to protect M1 RAM
     file_size_cap_bytes: int = 512_000  # 500 KB
 
+    # CP3 — Hybrid retrieval
+    use_bm25:       bool = True   # BM25 sparse search alongside vector
+    hybrid_rrf_k:   int  = 60    # Reciprocal Rank Fusion constant
+    graph_max_hops: int  = 2     # max traversal depth in Kuzu
+    bm25_top_k:     int  = 20    # candidates from BM25 before RRF
+    vector_top_k:   int  = 20    # candidates from dense search before RRF
+
     # API server
     api_host: str = "0.0.0.0"
     api_port: int = 8000

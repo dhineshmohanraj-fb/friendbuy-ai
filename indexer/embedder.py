@@ -217,8 +217,13 @@ def embed_and_store(
         _atomic_replace(live_path, write_path)
         con.print(f"[green]✓[/green] Index updated at [dim]{live_path}[/dim]")
 
-    # Invalidate the cached store so the next query picks up fresh data
+    # Invalidate cached stores so the next query picks up fresh data
     _invalidate_store()
+    try:
+        from retriever.bm25_index import invalidate as _bm25_invalidate
+        _bm25_invalidate()
+    except Exception:  # noqa: BLE001
+        pass   # BM25 not installed or not yet imported — fine
 
     # Update delta tracker — mark all indexed files as "current"
     tracker = DeltaTracker()

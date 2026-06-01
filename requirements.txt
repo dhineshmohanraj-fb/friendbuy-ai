@@ -29,3 +29,6 @@ kuzu>=0.6.0; python_version < "3.13"
 
 # CP2 — testing
 pytest>=8.0.0
+
+# CP3 — hybrid retrieval (BM25 sparse search)
+rank-bm25>=0.2
