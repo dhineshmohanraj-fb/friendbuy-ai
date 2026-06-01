@@ -27,6 +27,61 @@ def repo_node_id(repo_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Module → file path resolution helper (used by GraphBuilder._resolve_import)
+# ---------------------------------------------------------------------------
+
+def _module_to_candidates(module: str, current_path: str) -> list[str]:
+    """
+    Generate possible relative file paths that *module* might resolve to.
+
+    Examples::
+
+        "os"                    → ["os.py", "os/__init__.py"]
+        ".models"               → ["<current_dir>/models.py", ...]
+        "api.services.campaign" → ["api/services/campaign.py", ...]
+        "./services/campaign"   → ["services/campaign.js", ...]
+    """
+    from pathlib import PurePosixPath
+    candidates: list[str] = []
+    current_dir = str(PurePosixPath(current_path).parent)
+
+    # --- JS/TS relative (starts with ./ or ../) ---
+    if module.startswith("./") or module.startswith("../"):
+        base = str(PurePosixPath(current_dir) / module)
+        for ext in ("", ".js", ".ts", ".jsx", ".tsx"):
+            candidates.append(base + ext)
+        candidates.append(base + "/index.js")
+        candidates.append(base + "/index.ts")
+
+    # --- Python relative imports (starts with one or more dots) ---
+    elif module.startswith("."):
+        dots     = len(module) - len(module.lstrip("."))
+        mod_part = module.lstrip(".")
+        base     = current_dir
+        for _ in range(dots - 1):
+            base = str(PurePosixPath(base).parent)
+        if mod_part:
+            mod_path = mod_part.replace(".", "/")
+            candidates.append(f"{base}/{mod_path}.py")
+            candidates.append(f"{base}/{mod_path}/__init__.py")
+        else:
+            candidates.append(f"{base}/__init__.py")
+
+    # --- Python absolute dotted paths ---
+    elif "." in module:
+        mod_path = module.replace(".", "/")
+        candidates.append(f"{mod_path}.py")
+        candidates.append(f"{mod_path}/__init__.py")
+
+    # --- Single-name modules ---
+    else:
+        candidates.append(f"{module}.py")
+        candidates.append(f"{module}/__init__.py")
+
+    return candidates
+
+
+# ---------------------------------------------------------------------------
 # DDL — full schema (all CPs)
 # ---------------------------------------------------------------------------
 
@@ -255,6 +310,403 @@ class GraphBuilder:
                 "CREATE (f)-[:BELONGS_TO_REPO]->(r)",
                 parameters={"fid": fid, "rid": rid},
             )
+
+    # ------------------------------------------------------------------
+    # CP2 — Class nodes
+    # ------------------------------------------------------------------
+
+    def upsert_class(self, data: dict) -> None:
+        """Insert or update a Class node."""
+        cid = data["class_id"]
+        exists = self._conn.execute(
+            "MATCH (c:Class) WHERE c.class_id = $id RETURN c LIMIT 1",
+            parameters={"id": cid},
+        ).has_next()
+
+        if exists:
+            self._conn.execute(
+                "MATCH (c:Class) WHERE c.class_id = $id "
+                "SET c.start_line = $sl, c.end_line = $el, "
+                "    c.docstring = $doc, c.content_hash = COALESCE(c.content_hash, '')",
+                parameters={
+                    "id":  cid,
+                    "sl":  data["start_line"],
+                    "el":  data["end_line"],
+                    "doc": data.get("docstring", ""),
+                },
+            )
+        else:
+            self._conn.execute(
+                """CREATE (:Class {
+                    class_id: $id, name: $name, qualified_name: $qn,
+                    file_path: $fp, repo_name: $rn,
+                    start_line: $sl, end_line: $el,
+                    docstring: $doc, language: $lang
+                })""",
+                parameters={
+                    "id":   cid,
+                    "name": data["name"],
+                    "qn":   data.get("qualified_name", data["name"]),
+                    "fp":   data["file_path"],
+                    "rn":   data["repo_name"],
+                    "sl":   data["start_line"],
+                    "el":   data["end_line"],
+                    "doc":  data.get("docstring", ""),
+                    "lang": data.get("language", ""),
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # CP2 — Function nodes
+    # ------------------------------------------------------------------
+
+    def upsert_function(self, data: dict) -> None:
+        """Insert or update a Function node."""
+        fid = data["function_id"]
+        exists = self._conn.execute(
+            "MATCH (f:Function) WHERE f.function_id = $id RETURN f LIMIT 1",
+            parameters={"id": fid},
+        ).has_next()
+
+        if exists:
+            self._conn.execute(
+                "MATCH (f:Function) WHERE f.function_id = $id "
+                "SET f.start_line = $sl, f.end_line = $el, "
+                "    f.is_async = $ia, f.docstring = $doc",
+                parameters={
+                    "id":  fid,
+                    "sl":  data["start_line"],
+                    "el":  data["end_line"],
+                    "ia":  data.get("is_async", False),
+                    "doc": data.get("docstring", ""),
+                },
+            )
+        else:
+            self._conn.execute(
+                """CREATE (:Function {
+                    function_id: $id, name: $name, qualified_name: $qn,
+                    file_path: $fp, repo_name: $rn,
+                    start_line: $sl, end_line: $el,
+                    is_async: $ia, is_method: $im,
+                    docstring: $doc, language: $lang
+                })""",
+                parameters={
+                    "id":   fid,
+                    "name": data["name"],
+                    "qn":   data.get("qualified_name", data["name"]),
+                    "fp":   data["file_path"],
+                    "rn":   data["repo_name"],
+                    "sl":   data["start_line"],
+                    "el":   data["end_line"],
+                    "ia":   data.get("is_async", False),
+                    "im":   data.get("is_method", False),
+                    "doc":  data.get("docstring", ""),
+                    "lang": data.get("language", ""),
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # CP2 — APIEndpoint nodes
+    # ------------------------------------------------------------------
+
+    def upsert_api_endpoint(self, data: dict) -> None:
+        """Insert or update an APIEndpoint node."""
+        eid = data["endpoint_id"]
+        exists = self._conn.execute(
+            "MATCH (e:APIEndpoint) WHERE e.endpoint_id = $id RETURN e LIMIT 1",
+            parameters={"id": eid},
+        ).has_next()
+
+        if not exists:
+            self._conn.execute(
+                """CREATE (:APIEndpoint {
+                    endpoint_id: $id, http_method: $hm, path_pattern: $pp,
+                    full_path: $fp, framework: $fw,
+                    file_path: $fpath, repo_name: $rn
+                })""",
+                parameters={
+                    "id":    eid,
+                    "hm":    data["http_method"],
+                    "pp":    data["path_pattern"],
+                    "fp":    data.get("full_path", data["path_pattern"]),
+                    "fw":    data.get("framework", ""),
+                    "fpath": data["file_path"],
+                    "rn":    data["repo_name"],
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # CP2 — Symbol batch upsert (nodes + all structural edges)
+    # ------------------------------------------------------------------
+
+    def upsert_symbols_from_batch(
+        self,
+        file_id: str,
+        node_batch,   # NodeBatch from ast_parser
+        edge_batch,   # EdgeBatch from ast_parser
+        repo_name: str = "",
+    ) -> dict[str, int]:
+        """
+        Upsert Class / Function / APIEndpoint nodes and all structural edges
+        from a single file's NodeBatch + EdgeBatch.
+
+        Returns a dict of counts::
+
+            {"classes": N, "functions": N, "endpoints": N, "edges": N}
+        """
+        counts = {"classes": 0, "functions": 0, "endpoints": 0, "edges": 0}
+
+        # 1. Upsert nodes first so edges can reference them
+        for cls in node_batch.classes:
+            self.upsert_class(cls)
+            counts["classes"] += 1
+
+        for fn in node_batch.functions:
+            self.upsert_function(fn)
+            counts["functions"] += 1
+
+        for ep in node_batch.endpoints:
+            self.upsert_api_endpoint(ep)
+            counts["endpoints"] += 1
+
+        # 2. CONTAINS_CLASS edges
+        for fid, cid in edge_batch.contains_class:
+            if not self._edge_exists("CONTAINS_CLASS", "File", "file_id", fid,
+                                     "Class", "class_id", cid):
+                try:
+                    self._conn.execute(
+                        "MATCH (f:File), (c:Class) "
+                        "WHERE f.file_id = $fid AND c.class_id = $cid "
+                        "CREATE (f)-[:CONTAINS_CLASS]->(c)",
+                        parameters={"fid": fid, "cid": cid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 3. CONTAINS_FUNCTION edges
+        for fid, fnid in edge_batch.contains_function:
+            if not self._edge_exists("CONTAINS_FUNCTION", "File", "file_id", fid,
+                                     "Function", "function_id", fnid):
+                try:
+                    self._conn.execute(
+                        "MATCH (f:File), (fn:Function) "
+                        "WHERE f.file_id = $fid AND fn.function_id = $fnid "
+                        "CREATE (f)-[:CONTAINS_FUNCTION]->(fn)",
+                        parameters={"fid": fid, "fnid": fnid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 4. METHOD_OF edges
+        for fnid, cid in edge_batch.method_of:
+            if not self._edge_exists("METHOD_OF", "Function", "function_id", fnid,
+                                     "Class", "class_id", cid):
+                try:
+                    self._conn.execute(
+                        "MATCH (fn:Function), (c:Class) "
+                        "WHERE fn.function_id = $fnid AND c.class_id = $cid "
+                        "CREATE (fn)-[:METHOD_OF]->(c)",
+                        parameters={"fnid": fnid, "cid": cid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 5. EXPOSES edges  (File → APIEndpoint)
+        for fid, eid in edge_batch.exposes:
+            if not self._edge_exists("EXPOSES", "File", "file_id", fid,
+                                     "APIEndpoint", "endpoint_id", eid):
+                try:
+                    self._conn.execute(
+                        "MATCH (f:File), (e:APIEndpoint) "
+                        "WHERE f.file_id = $fid AND e.endpoint_id = $eid "
+                        "CREATE (f)-[:EXPOSES]->(e)",
+                        parameters={"fid": fid, "eid": eid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 6. HANDLES edges  (APIEndpoint → Function)
+        for eid, fnid in edge_batch.handles:
+            if not self._edge_exists("HANDLES", "APIEndpoint", "endpoint_id", eid,
+                                     "Function", "function_id", fnid):
+                try:
+                    self._conn.execute(
+                        "MATCH (e:APIEndpoint), (fn:Function) "
+                        "WHERE e.endpoint_id = $eid AND fn.function_id = $fnid "
+                        "CREATE (e)-[:HANDLES]->(fn)",
+                        parameters={"eid": eid, "fnid": fnid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 7. INHERITS edges — resolve parent class name → class_id
+        batch_class_map = {c["name"]: c["class_id"] for c in node_batch.classes}
+        for child_cid, parent_name in edge_batch.inherits:
+            parent_cid = batch_class_map.get(parent_name)
+            if not parent_cid and repo_name:
+                try:
+                    result = self._conn.execute(
+                        "MATCH (c:Class) WHERE c.name = $nm AND c.repo_name = $rn "
+                        "RETURN c.class_id LIMIT 1",
+                        parameters={"nm": parent_name, "rn": repo_name},
+                    )
+                    if result.has_next():
+                        parent_cid = result.get_next()[0]
+                except Exception:
+                    pass
+
+            if parent_cid and not self._edge_exists(
+                "INHERITS", "Class", "class_id", child_cid,
+                "Class", "class_id", parent_cid,
+            ):
+                try:
+                    self._conn.execute(
+                        "MATCH (c1:Class), (c2:Class) "
+                        "WHERE c1.class_id = $cid1 AND c2.class_id = $cid2 "
+                        "CREATE (c1)-[:INHERITS]->(c2)",
+                        parameters={"cid1": child_cid, "cid2": parent_cid},
+                    )
+                    counts["edges"] += 1
+                except Exception:
+                    pass
+
+        # 8. IMPORT_DEP edges — best-effort file-to-file resolution
+        for imp in edge_batch.imports:
+            try:
+                self._upsert_import_dep(imp, file_id)
+                counts["edges"] += 1
+            except Exception:
+                pass
+
+        return counts
+
+    # ------------------------------------------------------------------
+    # CP2 — Edge existence check
+    # ------------------------------------------------------------------
+
+    def _edge_exists(
+        self,
+        rel_type: str,
+        from_label: str, from_key: str, from_val: str,
+        to_label: str,   to_key: str,   to_val: str,
+    ) -> bool:
+        """Return True if this directed relationship already exists."""
+        try:
+            result = self._conn.execute(
+                f"MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label}) "
+                f"WHERE a.{from_key} = $fv AND b.{to_key} = $tv "
+                f"RETURN count(r) LIMIT 1",
+                parameters={"fv": from_val, "tv": to_val},
+            )
+            return bool(result.has_next() and result.get_next()[0] > 0)
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # CP2 — Import dependency resolution
+    # ------------------------------------------------------------------
+
+    def _upsert_import_dep(self, imp: dict, from_file_id: str) -> None:
+        """
+        Try to resolve an import to a File node and create an IMPORT_DEP edge.
+        Silently skips if the target file cannot be found.
+        """
+        module = imp.get("module", "").strip()
+        if not module:
+            return
+
+        target_fid = self._resolve_import_to_file(module, from_file_id)
+        if not target_fid or target_fid == from_file_id:
+            return
+
+        if self._edge_exists(
+            "IMPORT_DEP", "File", "file_id", from_file_id,
+            "File", "file_id", target_fid,
+        ):
+            return
+
+        import json as _json
+        symbols_json = _json.dumps(imp.get("symbols", []))
+        source_line  = imp.get("source_line", 0)
+
+        self._conn.execute(
+            "MATCH (a:File), (b:File) "
+            "WHERE a.file_id = $fid AND b.file_id = $tid "
+            "CREATE (a)-[:IMPORT_DEP {imported_symbols: $syms, source_line: $line}]->(b)",
+            parameters={
+                "fid":  from_file_id,
+                "tid":  target_fid,
+                "syms": symbols_json,
+                "line": source_line,
+            },
+        )
+
+    def _resolve_import_to_file(
+        self, module: str, from_file_id: str
+    ) -> str | None:
+        """
+        Best-effort: map a module/import string to a File node's file_id.
+
+        Strategy:
+        1. Get the current file's path and repo from Kuzu.
+        2. Build candidate relative paths from the module string.
+        3. Query Kuzu for a File node whose path ends with each candidate.
+        """
+        try:
+            result = self._conn.execute(
+                "MATCH (f:File) WHERE f.file_id = $id "
+                "RETURN f.file_path, f.repo_name LIMIT 1",
+                parameters={"id": from_file_id},
+            )
+            if not result.has_next():
+                return None
+            row          = result.get_next()
+            current_path = row[0]
+            repo_name    = row[1]
+        except Exception:
+            return None
+
+        candidates = _module_to_candidates(module, current_path)
+
+        for candidate in candidates:
+            try:
+                r = self._conn.execute(
+                    "MATCH (f:File) WHERE f.repo_name = $rn "
+                    "AND f.file_path ENDS WITH $fp "
+                    "RETURN f.file_id LIMIT 1",
+                    parameters={"rn": repo_name, "fp": candidate},
+                )
+                if r.has_next():
+                    return r.get_next()[0]
+            except Exception:
+                continue
+        return None
+
+    # ------------------------------------------------------------------
+    # CP2 — Delete stale symbols for a changed file
+    # ------------------------------------------------------------------
+
+    def delete_file_symbols(self, file_path: str, repo_name: str) -> None:
+        """
+        Delete all Class, Function, and APIEndpoint nodes that belong to
+        *file_path* in *repo_name*.  Used during incremental re-indexing
+        to remove stale symbols before inserting fresh ones.
+        """
+        for label in ("Class", "Function", "APIEndpoint"):
+            try:
+                self._conn.execute(
+                    f"MATCH (n:{label}) "
+                    "WHERE n.file_path = $fp AND n.repo_name = $rn "
+                    "DETACH DELETE n",
+                    parameters={"fp": file_path, "rn": repo_name},
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Bulk helpers

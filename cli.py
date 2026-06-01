@@ -31,43 +31,35 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 def cmd_index(reindex: bool, no_graph: bool = False) -> None:
-    from config import get_settings
-    from indexer.embedder import embed_and_store
-    from indexer.repo_loader import load_repos
-    from indexer.splitter import split_documents
+    from pipeline.index_pipeline import IndexPipeline
 
     console.print(Rule("[bold cyan]friendbuy-ai — Indexer[/bold cyan]"))
 
     if reindex:
         console.print("[yellow]--reindex flag set: existing index will be wiped.[/yellow]\n")
     if no_graph:
-        # Temporarily disable graph for this run
-        import os
-        os.environ["USE_GRAPH"] = "false"
-        get_settings.cache_clear()
         console.print("[dim]--no-graph: skipping knowledge graph update.[/dim]\n")
 
-    console.print("[bold]Step 1/3[/bold]  Loading files from repos…\n")
-    documents = load_repos()
+    result = IndexPipeline().run(reindex=reindex, no_graph=no_graph)
 
-    if not documents:
-        console.print("[red]No documents loaded. Aborting.[/red]")
-        sys.exit(1)
+    if result.changed_files == 0 and result.total_files_scanned > 0:
+        return  # Pipeline already printed "up-to-date" message
 
-    console.print(f"\n[bold]Step 2/3[/bold]  Splitting {len(documents):,} documents into chunks…")
-    chunks = split_documents(documents)
-
-    # Show AST vs character split breakdown
-    ast_chunks  = sum(1 for c in chunks if "symbol_name" in c.metadata)
-    char_chunks = len(chunks) - ast_chunks
-    console.print(f"  → {len(chunks):,} chunks  "
-                  f"([cyan]{ast_chunks:,}[/cyan] AST-aware, "
-                  f"[dim]{char_chunks:,}[/dim] character-split)\n")
-
-    console.print("[bold]Step 3/3[/bold]  Embedding & storing in ChromaDB…\n")
-    embed_and_store(chunks, reindex=reindex)
-
-    console.print("\n[bold green]✓ Indexing complete![/bold green]")
+    # Graph summary table
+    if result.graph:
+        from rich.table import Table
+        tbl = Table(title="Graph nodes indexed", show_header=True, header_style="bold cyan")
+        tbl.add_column("Type", style="cyan")
+        tbl.add_column("Count", justify="right", style="green")
+        for label in ("classes", "functions", "endpoints"):
+            cnt = result.graph.get(label, 0)
+            if cnt:
+                tbl.add_row(label.capitalize(), f"{cnt:,}")
+        edge_cnt = result.graph.get("edges", 0)
+        if edge_cnt:
+            tbl.add_row("[dim]edges created[/dim]", f"[dim]{edge_cnt:,}[/dim]")
+        if tbl.row_count:
+            console.print(tbl)
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +196,6 @@ def cmd_graph_stats() -> None:
         console.print(edge_table)
 
         console.print(f"\n[dim]Graph DB: {settings.graph_db_path.resolve()}[/dim]")
-        console.print(
-            "[dim]Edges will be populated in CP2 (Class/Function extraction).[/dim]"
-        )
 
     except ImportError:
         console.print(

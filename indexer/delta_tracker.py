@@ -84,10 +84,19 @@ class DeltaTracker:
                     repo_name       TEXT NOT NULL,
                     content_hash    TEXT NOT NULL,
                     chunk_ids       TEXT NOT NULL,
+                    graph_node_ids  TEXT NOT NULL DEFAULT '[]',
                     last_indexed_at TEXT NOT NULL
                 )
                 """
             )
+            # CP2 migration: add graph_node_ids to existing CP1 databases
+            try:
+                conn.execute(
+                    "ALTER TABLE doc_registry ADD COLUMN graph_node_ids TEXT NOT NULL DEFAULT '[]'"
+                )
+            except Exception:
+                pass  # Column already exists — expected on fresh installs
+
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_file ON doc_registry(file_path)"
             )
@@ -135,17 +144,20 @@ class DeltaTracker:
         repo_name: str,
         content_hash: str,
         chunk_ids: list[str],
+        graph_node_ids: list[str] | None = None,  # CP2
     ) -> None:
         """Insert or update the registry entry for a document."""
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO doc_registry
-                    (doc_id, file_path, repo_name, content_hash, chunk_ids, last_indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (doc_id, file_path, repo_name, content_hash,
+                     chunk_ids, graph_node_ids, last_indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     content_hash    = excluded.content_hash,
                     chunk_ids       = excluded.chunk_ids,
+                    graph_node_ids  = excluded.graph_node_ids,
                     last_indexed_at = excluded.last_indexed_at
                 """,
                 (
@@ -154,6 +166,7 @@ class DeltaTracker:
                     repo_name,
                     content_hash,
                     json.dumps(chunk_ids),
+                    json.dumps(graph_node_ids or []),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -178,6 +191,24 @@ class DeltaTracker:
         if row is None:
             return []
         return json.loads(row["chunk_ids"])
+
+    def get_graph_node_ids(self, doc_id: str) -> list[str]:
+        """Return the Kuzu graph node IDs stored for *doc_id* (CP2)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT graph_node_ids FROM doc_registry WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
+        if row is None:
+            return []
+        return json.loads(row["graph_node_ids"] or "[]")
+
+    def update_graph_node_ids(self, doc_id: str, node_ids: list[str]) -> None:
+        """Update graph_node_ids for an already-registered document (CP2)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE doc_registry SET graph_node_ids = ? WHERE doc_id = ?",
+                (json.dumps(node_ids), doc_id),
+            )
 
     def clear_all(self) -> None:
         """Delete every entry (used during --reindex)."""

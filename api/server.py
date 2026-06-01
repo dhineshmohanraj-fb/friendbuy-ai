@@ -48,11 +48,15 @@ class IndexAcceptedResponse(BaseModel):
 
 
 class IndexJobStatus(BaseModel):
-    status: str                  # accepted | running | completed | failed
-    chunks_indexed: int | None = None
-    error: str | None = None
-    started_at: str | None = None
-    completed_at: str | None = None
+    status:           str                  # accepted | running | completed | failed
+    chunks_indexed:   int | None = None
+    changed_files:    int | None = None    # CP2
+    skipped_files:    int | None = None    # CP2
+    graph:            dict | None = None   # CP2 — node / edge counts
+    elapsed_seconds:  float | None = None  # CP2
+    error:            str | None = None
+    started_at:       str | None = None
+    completed_at:     str | None = None
 
 
 class StatsResponse(BaseModel):
@@ -218,33 +222,29 @@ async def stats() -> StatsResponse:
 # ---------------------------------------------------------------------------
 
 async def _run_index_bg(job_id: str, reindex: bool) -> None:
-    """Background task: runs the full indexing pipeline in a thread pool."""
-    _index_jobs[job_id]["status"] = "running"
+    """Background task: runs the full CP2 indexing pipeline in a thread pool."""
+    _index_jobs[job_id]["status"]     = "running"
     _index_jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        from indexer.embedder import embed_and_store
-        from indexer.repo_loader import load_repos
-        from indexer.splitter import split_documents
+        from pipeline.index_pipeline import IndexPipeline
 
-        docs = await asyncio.to_thread(load_repos)
-        if not docs:
-            _index_jobs[job_id].update({"status": "failed", "error": "No documents found in repos dir."})
-            return
+        result = await asyncio.to_thread(IndexPipeline().run, reindex)
 
-        chunks = await asyncio.to_thread(split_documents, docs)
-        await asyncio.to_thread(embed_and_store, chunks, reindex)
-
-        _index_jobs[job_id].update(
-            {
-                "status": "completed",
-                "chunks_indexed": len(chunks),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        _index_jobs[job_id].update({
+            "status":        "completed",
+            "chunks_indexed": result.total_chunks,
+            "changed_files":  result.changed_files,
+            "skipped_files":  result.skipped_files,
+            "graph":          result.graph,
+            "elapsed_seconds": result.elapsed_seconds,
+            "completed_at":   datetime.now(timezone.utc).isoformat(),
+        })
     except SystemExit as exc:
-        # SystemExit is raised by embedder/loader on service errors
-        _index_jobs[job_id].update({"status": "failed", "error": f"Service error (code {exc.code}). Check server logs."})
+        _index_jobs[job_id].update({
+            "status": "failed",
+            "error":  f"Service error (code {exc.code}). Check server logs.",
+        })
     except Exception as exc:
         _index_jobs[job_id].update({"status": "failed", "error": str(exc)})
 

@@ -26,3 +26,6 @@ tree-sitter-typescript>=0.22.0
 # If you are on Python 3.13+, the graph features are skipped gracefully.
 # To enable: recreate the venv with Python 3.11 → then pip install kuzu>=0.6.0
 kuzu>=0.6.0; python_version < "3.13"
+
+# CP2 — testing
+pytest>=8.0.0
