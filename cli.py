@@ -160,17 +160,26 @@ def cmd_stats() -> None:
     count = collection.count()
     metadata = collection.metadata or {}
 
-    # Fetch all metadata to compute per-repo stats
-    all_meta = collection.get(include=["metadatas"])["metadatas"] or []
+    # Fetch metadata in batches to avoid ChromaDB "too many SQL variables" error
+    BATCH = 2000
     repo_counts: dict[str, int] = {}
     file_set: set[str] = set()
-    for m in all_meta:
-        if m:
-            repo = m.get("repo_name", "unknown")
-            repo_counts[repo] = repo_counts.get(repo, 0) + 1
-            fp = m.get("file_path")
-            if fp:
-                file_set.add(fp)
+    offset = 0
+    while True:
+        batch = collection.get(include=["metadatas"], limit=BATCH, offset=offset)
+        metas = batch.get("metadatas") or []
+        if not metas:
+            break
+        for m in metas:
+            if m:
+                repo = m.get("repo_name", "unknown")
+                repo_counts[repo] = repo_counts.get(repo, 0) + 1
+                fp = m.get("file_path")
+                if fp:
+                    file_set.add(fp)
+        offset += BATCH
+        if len(metas) < BATCH:
+            break
 
     table = Table(show_header=True, header_style="bold cyan", title="Knowledge Base Stats")
     table.add_column("Repo", style="cyan")

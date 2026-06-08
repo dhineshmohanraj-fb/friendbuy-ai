@@ -28,8 +28,11 @@ import anthropic
 from rich.console import Console
 
 from config import get_settings
+from observability.logger import get_logger, log
 from retriever.context_filter import filter_and_summarise
 from retriever.vector_search import SearchResult
+
+_logger = get_logger("query_pipeline")
 
 
 def _console() -> Console:
@@ -113,6 +116,9 @@ def run(
     query_id   = str(uuid.uuid4())
     t_start    = time.time()
 
+    log(_logger, "info", "query.start",
+        query_id=query_id, query=query[:120], repo_name=repo_name)
+
     if not settings.anthropic_api_key:
         _console().print(
             "\n[bold red]Error:[/bold red] ANTHROPIC_API_KEY is not set.\n"
@@ -129,6 +135,9 @@ def run(
             _cache = SemanticCache()
             hit = _cache.lookup(query)
             if hit:
+                log(_logger, "info", "cache.hit",
+                    query_id=query_id, similarity=round(hit.similarity, 4),
+                    cached_query=hit.cached_query[:80])
                 return PipelineResult(
                     answer=hit.answer,
                     relevant_files=hit.relevant_files,
@@ -175,6 +184,9 @@ def run(
         query_entities = []
 
     retrieval_ms = (time.time() - t_retrieval) * 1000
+    log(_logger, "info", "retrieval.done",
+        query_id=query_id, vector=v_count, bm25=b_count, graph=g_count,
+        entities=query_entities, retrieval_ms=round(retrieval_ms, 1))
 
     if not results:
         return PipelineResult(
@@ -262,6 +274,10 @@ def run(
         output_tokens = response.usage.output_tokens
 
     llm_ms = (time.time() - t_llm) * 1000
+    log(_logger, "info", "llm.done",
+        query_id=query_id, model=settings.claude_model,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        llm_ms=round(llm_ms, 1))
 
     # ------------------------------------------------------------------
     # 5. Trace log

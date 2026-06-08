@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     # CP4 — Cross-repo linking
     use_cross_repo_linking: bool = True   # detect HTTP/Kafka cross-repo edges
 
+    # CP5 — Observability
+    log_level: str  = "INFO"            # DEBUG | INFO | WARNING | ERROR
+    log_file:  str  = "./cache/app.log" # set to "" to disable file logging
+
+    # CP5 — API auth
+    api_key: str | None = None          # Bearer token; if None, auth is disabled
+
+    # CP5 — Embedding drift detection
+    drift_similarity_threshold: float = 0.999   # cosine threshold for "same model"
+
     # API server
     api_host: str = "0.0.0.0"
     api_port: int = 8000

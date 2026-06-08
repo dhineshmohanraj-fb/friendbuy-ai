@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from api.auth import require_api_key
+from api.graph_viz import GRAPH_VIEWER_HTML, get_graph_data
 from config import get_settings
 
 
@@ -204,18 +206,27 @@ async def stats() -> StatsResponse:
         db = load_vector_store()
         collection = db._collection  # type: ignore[attr-defined]
         count = collection.count()
-        meta_result = collection.get(include=["metadatas"])
-        all_meta = meta_result.get("metadatas") or []
 
+        # Batch fetch to avoid ChromaDB "too many SQL variables" on large indexes
+        BATCH = 2000
         repo_counts: dict[str, int] = {}
         file_set: set[str] = set()
-        for m in all_meta:
-            if m:
-                repo = m.get("repo_name", "unknown")
-                repo_counts[repo] = repo_counts.get(repo, 0) + 1
-                fp = m.get("file_path")
-                if fp:
-                    file_set.add(fp)
+        offset = 0
+        while True:
+            batch    = collection.get(include=["metadatas"], limit=BATCH, offset=offset)
+            all_meta = batch.get("metadatas") or []
+            if not all_meta:
+                break
+            for m in all_meta:
+                if m:
+                    repo = m.get("repo_name", "unknown")
+                    repo_counts[repo] = repo_counts.get(repo, 0) + 1
+                    fp = m.get("file_path")
+                    if fp:
+                        file_set.add(fp)
+            offset += BATCH
+            if len(all_meta) < BATCH:
+                break
 
         col_meta = collection.metadata or {}
         return StatsResponse(
@@ -302,6 +313,7 @@ async def graph_traverse(
     entity: str,
     hops: int = 2,
     repo: str | None = None,
+    _=Depends(require_api_key),
 ) -> GraphTraverseResponse:
     """
     Traverse the knowledge graph from a named entity (class, function, or endpoint).
@@ -375,11 +387,48 @@ async def cache_invalidate() -> CacheInvalidateResponse:
 
 
 # ---------------------------------------------------------------------------
+# Graph visualizer endpoints  (CP5 bonus)
+# ---------------------------------------------------------------------------
+
+@app.get("/graph/ui", response_class=HTMLResponse, tags=["graph"])
+async def graph_ui_page() -> HTMLResponse:
+    """
+    Interactive D3.js knowledge-graph browser.
+
+    Open in a browser: http://localhost:8000/graph/ui
+    """
+    return HTMLResponse(content=GRAPH_VIEWER_HTML)
+
+
+@app.get("/graph/viz/data", tags=["graph"])
+async def graph_viz_data(
+    repo:           str  | None = None,
+    max_nodes:      int         = 600,
+    show_functions: bool        = True,
+) -> dict:
+    """
+    Return graph nodes + edges as JSON for the D3 viewer.
+
+    Query params:
+      repo           – filter to a single repo (default: all)
+      max_nodes      – hard cap per node type (default: 600)
+      show_functions – include Function nodes (can be noisy; default: true)
+    """
+    settings = get_settings()
+    if not settings.graph_db_path.exists():
+        return {
+            "nodes": [], "edges": [], "stats": {},
+            "error": "Graph not built yet. Run: python cli.py index",
+        }
+    return await asyncio.to_thread(get_graph_data, repo, max_nodes, show_functions)
+
+
+# ---------------------------------------------------------------------------
 # Ask endpoint
 # ---------------------------------------------------------------------------
 
 @app.post("/ask", response_model=AskResponse, tags=["query"])
-async def ask(body: AskRequest, request: Request) -> AskResponse:
+async def ask(body: AskRequest, request: Request, _=Depends(require_api_key)) -> AskResponse:
     """Answer a question using the full RAG pipeline."""
     settings = get_settings()
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))

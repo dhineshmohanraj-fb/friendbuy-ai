@@ -91,9 +91,29 @@ class IndexPipeline:
         from indexer.repo_loader import load_repos
         from indexer.splitter import split_documents
 
-        start   = time.time()
-        con     = _console()
+        start    = time.time()
+        con      = _console()
         settings = get_settings()
+
+        # ------------------------------------------------------------------
+        # Step 0: Embedding drift check  (CP5)
+        # ------------------------------------------------------------------
+        if not reindex and settings.use_graph:
+            try:
+                from indexer.drift_detector import DriftDetector
+                dd     = DriftDetector()
+                report = dd.check_drift(settings.embedding_model)
+                if report.has_drift and report.reason not in ("no_fingerprint", "embedder_unavailable"):
+                    con.print(
+                        f"\n[bold yellow]⚠  Embedding drift detected![/bold yellow]  "
+                        f"reason=[cyan]{report.reason}[/cyan]  "
+                        f"stored=[dim]{report.stored_model}[/dim]  "
+                        f"current=[dim]{report.current_model}[/dim]\n"
+                        "The stored index may be stale.  "
+                        "Run [bold]python cli.py index --reindex[/bold] to rebuild.\n"
+                    )
+            except Exception:  # noqa: BLE001
+                pass   # drift check is best-effort
 
         # ------------------------------------------------------------------
         # Step 1: Load all source files
@@ -225,6 +245,16 @@ class IndexPipeline:
 
             if cross_repo_edges:
                 graph_counts["cross_repo_edges"] = cross_repo_edges
+
+        # ------------------------------------------------------------------
+        # Record fingerprint after successful reindex  (CP5)
+        # ------------------------------------------------------------------
+        if reindex and not no_graph and settings.use_graph:
+            try:
+                from indexer.drift_detector import DriftDetector
+                DriftDetector().record_fingerprint(settings.embedding_model)
+            except Exception:  # noqa: BLE001
+                pass
 
         elapsed = time.time() - start
         con.print(f"\n[bold green]✓ Done in {elapsed:.1f}s[/bold green]")
